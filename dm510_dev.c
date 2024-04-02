@@ -7,6 +7,7 @@
 #include <linux/cdev.h>
 #include <linux/slab.h>
 #include <linux/semaphore.h>
+#include "ioctl_commands.h"
 
 #define DEVICE_NAME "dm510_dev"
 #define BUFFER_SIZE 1024
@@ -31,8 +32,7 @@ typedef struct {
 } circular_buffer;
 
 static circular_buffer buffers[DEVICE_COUNT];
-static struct buffer buffers[BUFFER_COUNT];
-static size_T max_processes = 10;
+static size_t max_processes = 10;
 static struct cdev dm510_cdev;
 
 static int buffer_init(circular_buffer *buffer) {
@@ -176,28 +176,19 @@ long dm510_ioctl(
     unsigned long arg ) /* argument of the command */
 {
 	/* ioctl code belongs here */
-    switch(cmd){
-        case DM510_IOCRESET:
-            // Add reset logic
-            break;
-        case DM510_IOCSQUANTUM:
-            // Adjust buffer sizes or other settings based on arg
-            break;
-        default:
-            return -ENOTTY;
-        
+    switch(cmd){   
         case GET_BUFFER_SIZE:
         return buffer -> size;
 
         case SET_BUFFER_SIZE:{
             int i;
-            for(i = 0; i < BUFFER_COUNT: i++){
-                int used_space = buffers[i].size - free_space(buffers + i);
+            for(i = 0; i < DEVICE_COUNT; i++){
+                int used_space = buffers[i].size - buffer_free_space(buffers + i);
                 if(used_space > arg){
                     return rerror(-EINVAL, "The buffer(%d) has %lu amount of used space, it cannot be reduced to size %lu", i, used_space, arg);
                 }
-                for(i = 0; i < BUFFER_COUNT ; i++){
-                    resize(buffers + i, arg);
+                for(i = 0; i < DEVICE_COUNT ; i++){
+                    buffer_resize(buffers + i, arg);
                 }
             }
             break;
@@ -209,8 +200,8 @@ long dm510_ioctl(
             max_processes = arg;
             break;
 
-            case GET_Free_spACE:
-            return free_space(buffers + arg);
+            case GET_BUFFER_FREE_SPACE:
+            return buffer_free_space(buffers + arg);
 
             case GET_BUFFER_USED_SPACE:
             return buffers[arg].size - free_space(buffers + arg);
@@ -229,8 +220,5 @@ module_exit(dm510_cleanup_module);
 MODULE_AUTHOR("Your Name Here");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DM510 Assignment Device Driver");
-
-
-
 
 
