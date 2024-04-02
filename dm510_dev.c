@@ -177,6 +177,15 @@ long dm510_ioctl(
 {
 	/* ioctl code belongs here */
     switch(cmd){
+        case DM510_IOCRESET:
+            // Add reset logic
+            break;
+        case DM510_IOCSQUANTUM:
+            // Adjust buffer sizes or other settings based on arg
+            break;
+        default:
+            return -ENOTTY;
+        
         case GET_BUFFER_SIZE:
         return buffer -> size;
 
@@ -220,5 +229,8 @@ module_exit(dm510_cleanup_module);
 MODULE_AUTHOR("Your Name Here");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DM510 Assignment Device Driver");
+
+
+
 
 
