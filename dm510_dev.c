@@ -12,8 +12,12 @@
 #define BUFFER_SIZE 1024
 #define MINOR_START 0
 #define DEVICE_COUNT 2
+#define GET_BUFFER_SIZE 0 
+#define SET_BUFFER_SIZE 1
+#define GET_MAX_NR_PROCESSES 2
+#define SET_MAX_NR_PROCESSES 3
 
-static int dm510_major = 252;
+static int dm510_major = 0;
 module_param(dm510_major, int, S_IRUGO);
 
 typedef struct {
@@ -165,10 +169,6 @@ static void __exit dm510_cleanup_module(void) {
     printk(KERN_INFO "DM510: unregistered the device\n");
 }
 
-#define GET_BUFFER_SIZE 0 
-#define SET_BUFFER_SIZE 1
-#define GET_MAX_NR_PROCESSES 2
-#define SET_MAX_NR_PROCESSES 3
 
 long dm510_ioctl( 
     struct file *filp, 
@@ -220,4 +220,5 @@ module_exit(dm510_cleanup_module);
 MODULE_AUTHOR("Your Name Here");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DM510 Assignment Device Driver");
+
 
