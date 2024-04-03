@@ -1,4 +1,4 @@
-#include <linux/cdev.h>
+include <linux/cdev.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
@@ -34,38 +34,54 @@ struct dm510_device {
 static struct dm510_device device[DEVICE_COUNT];
 
 static int dm510_open(struct inode *inode, struct file *filp) {
-    struct dm510_device *dev = container_of(inode->i_cdev, struct dm510_device, cdev);
+    struct dm510_device *dev;
+
+    dev = container_of(inode->i_cdev, struct dm510_device, cdev);
     filp->private_data = dev;
 
     if (down_interruptible(&dev->sem))
         return -ERESTARTSYS;
-    
-    // Check if too many readers for read access
-    if ((filp->f_flags & O_ACCMODE) == O_RDONLY) {
-        if (dev->nreaders >= dev->max_processes) {
-            up(&dev->sem);
-            return -EMFILE; // Too many open files
-        }
-        dev->nreaders++;
-    } 
-    // Check if the device is already opened for writing
-    else if ((filp->f_flags & O_ACCMODE) == O_WRONLY) {
-        if (dev->nwriters > 0) {
-            up(&dev->sem);
-            return -EBUSY; // Device busy
-        }
-    else {
-    // If device is being opened for both reading and writing
-        if (filp->f_flags & O_RDWR) {
-        // Check for existing writers
-            if (dev->nwriters > 0) {
+
+    printk(KERN_INFO "dm510_open: Current readers: %d, writers: %d, max processes: %d\n",
+           dev->nreaders, dev->nwriters, dev->max_processes);
+
+    switch (filp->f_flags & O_ACCMODE) {
+        case O_WRONLY:
+            if (dev->nwriters) {
+                printk(KERN_INFO "dm510_open: Write access denied, device busy.\n");
                 up(&dev->sem);
-                return -EBUSY; // Device busy
-        }
-        // Increment both readers and writers since it's read-write access
-        dev->nreaders++;
-        dev->nwriters++;
-    } 
+                return -EBUSY;
+            }
+            dev->nwriters++;
+            break;
+        case O_RDONLY:
+            if (dev->nreaders >= dev->max_processes) {
+                printk(KERN_INFO "dm510_open: Read access denied, too many readers.\n");
+                up(&dev->sem);
+                return -EMFILE;
+            }
+            dev->nreaders++;
+            break;
+        case O_RDWR:
+            if (dev->nwriters) {
+                printk(KERN_INFO "dm510_open: Read/Write access denied, device busy.\n");
+                up(&dev->sem);
+                return -EBUSY;
+            }
+            // This needs to check max_processes for readers as well
+            if (dev->nreaders >= dev->max_processes) {
+                printk(KERN_INFO "dm510_open: Read/Write access denied, too many readers.\n");
+                up(&dev->sem);
+                return -EMFILE;
+            }
+            dev->nwriters++;
+            dev->nreaders++;
+            break;
+    }
+
+    printk(KERN_INFO "dm510_open: Access granted. Current readers: %d, writers: %d\n",
+           dev->nreaders, dev->nwriters);
+
     up(&dev->sem);
     return 0;
 }
@@ -75,13 +91,17 @@ static int dm510_release(struct inode *inode, struct file *filp) {
     struct dm510_device *dev = filp->private_data;
 
     down(&dev->sem);
-    if ((filp->f_flags & O_ACCMODE) == O_WRONLY)
+    // Handle the release of writers properly
+    if ((filp->f_flags & O_ACCMODE) == O_WRONLY || (filp->f_flags & O_ACCMODE) == O_RDWR)
         dev->nwriters--;
-    else if ((filp->f_flags & O_ACCMODE) == O_RDONLY)
+    // Handle the release of readers properly
+    if ((filp->f_flags & O_ACCMODE) == O_RDONLY || (filp->f_flags & O_ACCMODE) == O_RDWR)
         dev->nreaders--;
+    
     up(&dev->sem);
     return 0;
 }
+
 
 ssize_t dm510_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos) {
     struct dm510_device *dev = filp->private_data;
@@ -187,22 +207,28 @@ case SET_BUFFER_SIZE:
         }
     }
     break;
-        case GET_MAX_NR_PROCESSES:
-            // Returning the current max_processes to user space
-            if (copy_to_user((int __user *)arg, &dev->max_processes, sizeof(dev->max_processes)))
-                retval = -EFAULT;
-            break;
+       case GET_MAX_NR_PROCESSES:
+	   printk(KERN_INFO "DM510: ioctl GET_MAX_NR_PROCESSES before copy_to_user: %d\n", dev->max_processes);
+	   printk(KERN_INFO "Size of int in kernel space: %zu bytes\n", sizeof(int));
+           if (copy_to_user((int __user *)arg, &dev->max_processes, sizeof(dev->max_processes))) {
+               retval = -EFAULT;
+	   printk(KERN_INFO "Size of int in kernel space: %zu bytes\n", sizeof(int));
+           printk(KERN_INFO "DM510: ioctl GET_MAX_NR_PROCESSES after copy_to_user: %d\n", dev->max_processes);
+	  } 
+          break;
 
         case SET_MAX_NR_PROCESSES:
             // Updating max_processes from the value provided by user space
+   	    printk(KERN_INFO "3DM510: Current max_processes = %d\n", dev->max_processes);
+	    printk(KERN_INFO "3:Size of int in kernel space: %zu bytes\n", sizeof(int));
             if (copy_from_user(&dev->max_processes, (int __user *)arg, sizeof(dev->max_processes))) {
                 retval = -EFAULT;
+		printk(KERN_INFO "4:Size of int in kernel space: %zu bytes\n", sizeof(int));
             } else {
-                printk(KERN_INFO "DM510: Max processes updated to %d\n", dev->max_processes);
+                printk(KERN_INFO "DM510: ioctl SET_MAX_NR_PROCESSES value received: %d\n", dev->max_processes);
             }
             break;
 
-            break;
 case GET_BUFFER_FREE_SPACE: {
     int free_space;
     down(&dev->sem); // Ensure exclusive access
