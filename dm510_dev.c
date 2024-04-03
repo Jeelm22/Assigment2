@@ -1,4 +1,4 @@
-include <linux/cdev.h>
+#include <linux/cdev.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
@@ -179,41 +179,33 @@ long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
             if (copy_to_user((int __user *)arg, &dev->buffer_size, sizeof(dev->buffer_size)))
                 retval = -EFAULT;
             break;
-case SET_BUFFER_SIZE:
-    if (copy_from_user(&new_size, (int __user *)arg, sizeof(new_size))) {
-        retval = -EFAULT;
-    } else if (new_size <= 0) {
-        retval = -EINVAL; // Invalid buffer size
-    } else {
-        char *new_buffer = kzalloc(new_size * sizeof(char), GFP_KERNEL);
-        if (!new_buffer) {
-            retval = -ENOMEM; // Out of memory
-        } else {
-            down(&dev->sem); // Ensure exclusive access to the buffer
-            int used_space = (dev->tail >= dev->head) ? (dev->tail - dev->head) : (dev->buffer_size - dev->head + dev->tail);
-            if (new_size < used_space) {
-                // Handle the case where the new buffer is too small to fit existing data
-                retval = -EINVAL;
-            } else {
-                // Optionally, copy existing data to the new buffer. This step depends on your specific requirements.
-                // For simplicity, assume no data copying is needed, and we're just resizing.
-                kfree(dev->data);
-                dev->data = new_buffer;
-                dev->buffer_size = new_size;
-                dev->head = 0; // Reset pointers if not preserving data
-                dev->tail = used_space; // Adjust tail if data was preserved
-            }
-            up(&dev->sem); // Release the semaphore
-        }
-    }
-    break;
+	case SET_BUFFER_SIZE:
+	    if (copy_from_user(&new_size, (int __user *)arg, sizeof(new_size))) {
+	        retval = -EFAULT;
+	    } else if (new_size < 5) { // Ensure minimum buffer size of 5 bytes
+	        printk(KERN_INFO "DM510: Requested buffer size %d is too small. Minimum size is 5 bytes.\n", new_size);
+	        retval = -EINVAL; // Invalid buffer size
+	    } else {
+	        char *new_buffer = kzalloc(new_size * sizeof(char), GFP_KERNEL);
+	        if (!new_buffer) {
+	            retval = -ENOMEM; // Out of memory
+	        } else {
+	   	    down(&dev->sem); // Ensure exclusive access to the buffer
+	            // No need to check used space since data will be cleared
+	            kfree(dev->data); // Free old buffer
+        	    dev->data = new_buffer; // Assign new buffer
+	            dev->buffer_size = new_size; // Update buffer size
+ 	            dev->head = 0; // Reset pointers
+	            dev->tail = 0;
+        	    printk(KERN_INFO "DM510: Buffer size successfully changed to %d bytes.\n", new_size);
+	            up(&dev->sem); // Release the semaphore
+        	}
+    	   }
+	   break;
+
        case GET_MAX_NR_PROCESSES:
-	   printk(KERN_INFO "DM510: ioctl GET_MAX_NR_PROCESSES before copy_to_user: %d\n", dev->max_processes);
-	   printk(KERN_INFO "Size of int in kernel space: %zu bytes\n", sizeof(int));
            if (copy_to_user((int __user *)arg, &dev->max_processes, sizeof(dev->max_processes))) {
                retval = -EFAULT;
-	   printk(KERN_INFO "Size of int in kernel space: %zu bytes\n", sizeof(int));
-           printk(KERN_INFO "DM510: ioctl GET_MAX_NR_PROCESSES after copy_to_user: %d\n", dev->max_processes);
 	  } 
           break;
 
@@ -229,39 +221,39 @@ case SET_BUFFER_SIZE:
             }
             break;
 
-case GET_BUFFER_FREE_SPACE: {
-    int free_space;
-    down(&dev->sem); // Ensure exclusive access
-    if (dev->tail >= dev->head) {
-        free_space = dev->buffer_size - (dev->tail - dev->head) - 1;
-    } else {
-        free_space = (dev->head - dev->tail) - 1;
-    }
-    up(&dev->sem);
-    if (copy_to_user((int __user *)arg, &free_space, sizeof(free_space))) {
-        retval = -EFAULT;
-    }
-    break;
-}
+        case GET_BUFFER_FREE_SPACE: {
+            int free_space;
+            down(&dev->sem); // Ensure exclusive access
+            if (dev->tail >= dev->head) {
+                free_space = dev->buffer_size - (dev->tail - dev->head) - 1;
+            } else {
+                free_space = (dev->head - dev->tail) - 1;
+            }
+            up(&dev->sem);
+            if (copy_to_user((int __user *)arg, &free_space, sizeof(free_space))) {
+                retval = -EFAULT;
+            }
+            break;
+        }
 
-case GET_BUFFER_USED_SPACE: {
-    int used_space;
-    down(&dev->sem); // Ensure exclusive access
-    if (dev->tail >= dev->head) {
-        used_space = dev->tail - dev->head;
-    } else {
-        used_space = dev->buffer_size - (dev->head - dev->tail);
-    }
-    up(&dev->sem);
-    if (copy_to_user((int __user *)arg, &used_space, sizeof(used_space))) {
-        retval = -EFAULT;
-    }
-    break;
-}
-        default:
-            retval = -ENOTTY;
-    }
-    return retval;
+        case GET_BUFFER_USED_SPACE: {
+            int used_space;
+            down(&dev->sem); // Ensure exclusive access
+            if (dev->tail >= dev->head) {
+                used_space = dev->tail - dev->head;
+            } else {
+                used_space = dev->buffer_size - (dev->head - dev->tail);
+            }
+            up(&dev->sem);
+            if (copy_to_user((int __user *)arg, &used_space, sizeof(used_space))) {
+                retval = -EFAULT;
+            }
+            break;
+	}
+                default:
+                    retval = -ENOTTY;
+            }
+            return retval;
 }
 
 static struct file_operations dm510_fops = {
