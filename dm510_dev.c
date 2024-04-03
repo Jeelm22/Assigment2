@@ -45,6 +45,7 @@ static int buffer_init(circular_buffer *buffer) {
     sema_init(&buffer->sem, 1);
     return 0;
 }
+static DEFINE_MUTEX(dev_mutex); // Define and initialize the mutex
 
 static int dm510_open(struct inode *inode, struct file *filp) {
     int minor = iminor(inode);
@@ -52,11 +53,23 @@ static int dm510_open(struct inode *inode, struct file *filp) {
         printk(KERN_ALERT "DM510: No device for minor %d\n", minor);
         return -ENODEV;
     }
+
+    mutex_lock(&dev_mutex); // Protect the critical section
+    if (active_readers >= max_processes) {
+        mutex_unlock(&dev_mutex);
+        return -EBUSY; // Too many concurrent readers.
+    }
+    active_readers++; // Safely increment the count of active readers
+    mutex_unlock(&dev_mutex);
+
     filp->private_data = &buffers[minor - MINOR_START];
     return 0;
 }
 
 static int dm510_release(struct inode *inode, struct file *filp) {
+    mutex_lock(&dev_mutex); // Protect the critical section
+    active_readers--; // Decrement the count of active readers
+    mutex_unlock(&dev_mutex);
     return 0;
 }
 
