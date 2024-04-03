@@ -9,20 +9,15 @@
 
 //Find the smallest used space in all buffers
 int get_minimum_used_space(int fd) {
-    //Initializes the minimum space to the used space of the first buffer
-    int minSpace = ioctl(fd, GET_BUFFER_USED_SPACE, 0);
-    //Iterate through all buffers to find the one with the min. used space
-    for (int bufferIndex = 1; bufferIndex < BUFFER_COUNT; bufferIndex++) {
-        //Get the used space for the current buffer
-        int currentSpace = ioctl(fd, GET_BUFFER_USED_SPACE, bufferIndex);
-        //Update minSpace if the current buffer has less used space
-        if (currentSpace < minSpace) {
-            minSpace = currentSpace;
-        }
+    int usedSpace;
+    // Pass the address of usedSpace to ioctl
+    if (ioctl(fd, GET_BUFFER_USED_SPACE, &usedSpace) < 0) {
+        perror("Failed to get buffer used space");
+        return -1; // Return -1 to indicate error
     }
-    //Return the minimum used space found
-    return minSpace;
+    return usedSpace;
 }
+
 
 int main(int argc, char const *argv[]) {
     //Ensure there is at least one argument provided
@@ -41,14 +36,16 @@ int main(int argc, char const *argv[]) {
     int setResult = ioctl(fileDescriptor, SET_BUFFER_SIZE, newSize);
     
     // Check if the buffer size change was successful
-    if (setResult < 0) {
-        //If it failed, find the minum used space in the buffers
-        int usedSpace = get_minimum_used_space(fileDescriptor);
-        //Inform user if there is an error or a succuses  
-        printf("Cannot reduce buffer size to %d bytes; minimum used space is %d bytes.\n", newSize, usedSpace);
-    } else {
-        printf("Buffer size successfully changed to: %d bytes\n", newSize);
-    }
-
+	if (setResult < 0) {
+    // If it failed, find the minimum used space in the buffers
+	    int usedSpace = get_minimum_used_space(fileDescriptor);
+	    if (usedSpace < 0) {
+	        // Error handling was already done in get_minimum_used_space
+	        return 1; // Exit with an error code
+	    }
+	    printf("Cannot reduce buffer size to %d bytes; minimum used space is %d bytes.\n", newSize, usedSpace);
+	} else {
+	    printf("Buffer size successfully changed to: %d bytes\n", newSize);
+	}
     return 0;
 }
