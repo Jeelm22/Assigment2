@@ -54,9 +54,18 @@ static int dm510_open(struct inode *inode, struct file *filp) {
             up(&dev->sem);
             return -EBUSY; // Device busy
         }
+    else {
+    // If device is being opened for both reading and writing
+        if (filp->f_flags & O_RDWR) {
+        // Check for existing writers
+            if (dev->nwriters > 0) {
+                up(&dev->sem);
+                return -EBUSY; // Device busy
+        }
+        // Increment both readers and writers since it's read-write access
+        dev->nreaders++;
         dev->nwriters++;
     } 
-
     up(&dev->sem);
     return 0;
 }
