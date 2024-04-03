@@ -1,130 +1,232 @@
-#include <linux/module.h>
+#include <linux/cdev.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <linux/wait.h>
-#include <linux/cdev.h>
 #include <linux/slab.h>
 #include <linux/semaphore.h>
+#include <linux/module.h>
 #include "ioctl_commands.h"
 
 #define DEVICE_NAME "dm510_dev"
 #define BUFFER_SIZE 1024
 #define MINOR_START 0
 #define DEVICE_COUNT 2
-#define GET_BUFFER_SIZE 0 
-#define SET_BUFFER_SIZE 1
-#define GET_MAX_NR_PROCESSES 2
-#define SET_MAX_NR_PROCESSES 3
+#define DM510_IOC_MAGIC 'k'
+#define DM510_IOCRESET _IO(DM510_IOC_MAGIC, 0)
+#define DM510_IOCSQUANTUM _IOW(DM510_IOC_MAGIC, 1, int)
 
 static int dm510_major = 0;
 module_param(dm510_major, int, S_IRUGO);
 
-typedef struct {
-    char data[BUFFER_SIZE];
-    int head;
-    int tail;
-    size_t size;
-    wait_queue_head_t read_queue;
-    wait_queue_head_t write_queue;
+struct dm510_device {
+    struct cdev cdev;
+    char *data; // Changed to a pointer to support dynamic resizing
+    int buffer_size; // New field to keep track of the buffer size
+    int head, tail;
     struct semaphore sem;
-} circular_buffer;
+    wait_queue_head_t read_queue, write_queue;
+    int nreaders, nwriters;
+    int max_processes; // New field to limit the number of processes
+};
 
-static circular_buffer buffers[DEVICE_COUNT];
-static size_t max_processes = 10;
-static struct cdev dm510_cdev;
-
-static int buffer_init(circular_buffer *buffer) {
-    memset(buffer->data, 0, BUFFER_SIZE);
-    buffer->head = 0;
-    buffer->tail = 0;
-    buffer->size = 0;
-    init_waitqueue_head(&buffer->read_queue);
-    init_waitqueue_head(&buffer->write_queue);
-    sema_init(&buffer->sem, 1);
-    return 0;
-}
-static DEFINE_MUTEX(dev_mutex); // Define and initialize the mutex
+static struct dm510_device device[DEVICE_COUNT];
 
 static int dm510_open(struct inode *inode, struct file *filp) {
-    int minor = iminor(inode);
-    if (minor < MINOR_START || minor >= MINOR_START + DEVICE_COUNT) {
-        printk(KERN_ALERT "DM510: No device for minor %d\n", minor);
-        return -ENODEV;
-    }
+    struct dm510_device *dev = container_of(inode->i_cdev, struct dm510_device, cdev);
+    filp->private_data = dev;
 
-    mutex_lock(&dev_mutex); // Protect the critical section
-    if (active_readers >= max_processes) {
-        mutex_unlock(&dev_mutex);
-        return -EBUSY; // Too many concurrent readers.
-    }
-    active_readers++; // Safely increment the count of active readers
-    mutex_unlock(&dev_mutex);
+    if (down_interruptible(&dev->sem))
+        return -ERESTARTSYS;
+    
+    // Check if too many readers for read access
+    if ((filp->f_flags & O_ACCMODE) == O_RDONLY) {
+        if (dev->nreaders >= dev->max_processes) {
+            up(&dev->sem);
+            return -EMFILE; // Too many open files
+        }
+        dev->nreaders++;
+    } 
+    // Check if the device is already opened for writing
+    else if ((filp->f_flags & O_ACCMODE) == O_WRONLY) {
+        if (dev->nwriters > 0) {
+            up(&dev->sem);
+            return -EBUSY; // Device busy
+        }
+        dev->nwriters++;
+    } 
 
-    filp->private_data = &buffers[minor - MINOR_START];
+    up(&dev->sem);
     return 0;
 }
+
 
 static int dm510_release(struct inode *inode, struct file *filp) {
-    mutex_lock(&dev_mutex); // Protect the critical section
-    active_readers--; // Decrement the count of active readers
-    mutex_unlock(&dev_mutex);
+    struct dm510_device *dev = filp->private_data;
+
+    down(&dev->sem);
+    if ((filp->f_flags & O_ACCMODE) == O_WRONLY)
+        dev->nwriters--;
+    else if ((filp->f_flags & O_ACCMODE) == O_RDONLY)
+        dev->nreaders--;
+    up(&dev->sem);
     return 0;
 }
 
-static ssize_t dm510_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos) {
-    circular_buffer *buffer = (circular_buffer *)filp->private_data;
-    size_t to_copy, not_copied;
+ssize_t dm510_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos) {
+    struct dm510_device *dev = filp->private_data;
+    ssize_t result = 0;
 
-    if (down_interruptible(&buffer->sem))
+    if (down_interruptible(&dev->sem))
         return -ERESTARTSYS;
 
-    while (buffer->size == 0) {
-        up(&buffer->sem);
-        if (wait_event_interruptible(buffer->read_queue, buffer->size > 0))
-            return -ERESTARTSYS;
-        if (down_interruptible(&buffer->sem))
+    while (dev->head == dev->tail) { 
+        up(&dev->sem);
+        if (filp->f_flags & O_NONBLOCK)
+            return -EAGAIN;
+        if (wait_event_interruptible(dev->read_queue, dev->head != dev->tail))
+            return -ERESTARTSYS; 
+        if (down_interruptible(&dev->sem))
             return -ERESTARTSYS;
     }
 
-    to_copy = min(count, buffer->size);
-    not_copied = copy_to_user(buf, &buffer->data[buffer->tail], to_copy);
+    if (dev->head < dev->tail)
+        count = min(count, (size_t)(dev->tail - dev->head));
+    else 
+        count = min(count, (size_t)(BUFFER_SIZE - dev->head));
+    if (copy_to_user(buf, dev->data + dev->head, count)) {
+        result = -EFAULT;
+        goto out;
+    }
+    dev->head = (dev->head + count) % BUFFER_SIZE;
+    wake_up_interruptible(&dev->write_queue); 
 
-    buffer->tail = (buffer->tail + to_copy - not_copied) % BUFFER_SIZE;
-    buffer->size -= to_copy - not_copied;
+    result = count;
 
-    up(&buffer->sem);
-    wake_up_interruptible(&buffer->write_queue);
-
-    return to_copy - not_copied;
+out:
+    up(&dev->sem);
+    return result;
 }
 
-static ssize_t dm510_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos) {
-    circular_buffer *buffer = (circular_buffer *)filp->private_data;
-    size_t to_copy, not_copied;
+ssize_t dm510_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos) {
+    struct dm510_device *dev = filp->private_data;
+    ssize_t result = 0;
 
-    if (down_interruptible(&buffer->sem))
+    if (down_interruptible(&dev->sem))
         return -ERESTARTSYS;
 
-    while (BUFFER_SIZE - buffer->size == 0) {
-        up(&buffer->sem);
-        if (wait_event_interruptible(buffer->write_queue, BUFFER_SIZE - buffer->size > 0))
-            return -ERESTARTSYS;
-        if (down_interruptible(&buffer->sem))
+    while ((dev->tail + 1) % BUFFER_SIZE == dev->head) { 
+        up(&dev->sem); 
+        if (filp->f_flags & O_NONBLOCK)
+            return -EAGAIN;
+        if (wait_event_interruptible(dev->write_queue, (dev->tail + 1) % BUFFER_SIZE != dev->head))
+            return -ERESTARTSYS; 
+        if (down_interruptible(&dev->sem))
             return -ERESTARTSYS;
     }
 
-    to_copy = min(count, BUFFER_SIZE - buffer->size);
-    not_copied = copy_from_user(&buffer->data[buffer->head], buf, to_copy);
+    count = min(count, (size_t)(BUFFER_SIZE - dev->tail));
+    if (copy_from_user(dev->data + dev->tail, buf, count)) {
+        result = -EFAULT;
+        goto out;
+    }
+    dev->tail = (dev->tail + count) % BUFFER_SIZE;
+    wake_up_interruptible(&dev->read_queue);
 
-    buffer->head = (buffer->head + to_copy - not_copied) % BUFFER_SIZE;
-    buffer->size += to_copy - not_copied;
+    result = count;
 
-    up(&buffer->sem);
-    wake_up_interruptible(&buffer->read_queue);
+out:
+    up(&dev->sem);
+    return result;
+}
 
-    return to_copy - not_copied;
+long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
+    struct dm510_device *dev = filp->private_data;
+    int new_size, retval = 0;
+
+    switch (cmd) {
+        case GET_BUFFER_SIZE:
+            if (copy_to_user((int __user *)arg, &dev->buffer_size, sizeof(dev->buffer_size)))
+                retval = -EFAULT;
+            break;
+case SET_BUFFER_SIZE:
+    if (copy_from_user(&new_size, (int __user *)arg, sizeof(new_size))) {
+        retval = -EFAULT;
+    } else if (new_size <= 0) {
+        retval = -EINVAL; // Invalid buffer size
+    } else {
+        char *new_buffer = kzalloc(new_size * sizeof(char), GFP_KERNEL);
+        if (!new_buffer) {
+            retval = -ENOMEM; // Out of memory
+        } else {
+            down(&dev->sem); // Ensure exclusive access to the buffer
+            int used_space = (dev->tail >= dev->head) ? (dev->tail - dev->head) : (dev->buffer_size - dev->head + dev->tail);
+            if (new_size < used_space) {
+                // Handle the case where the new buffer is too small to fit existing data
+                retval = -EINVAL;
+            } else {
+                // Optionally, copy existing data to the new buffer. This step depends on your specific requirements.
+                // For simplicity, assume no data copying is needed, and we're just resizing.
+                kfree(dev->data);
+                dev->data = new_buffer;
+                dev->buffer_size = new_size;
+                dev->head = 0; // Reset pointers if not preserving data
+                dev->tail = used_space; // Adjust tail if data was preserved
+            }
+            up(&dev->sem); // Release the semaphore
+        }
+    }
+    break;
+        case GET_MAX_NR_PROCESSES:
+            // Returning the current max_processes to user space
+            if (copy_to_user((int __user *)arg, &dev->max_processes, sizeof(dev->max_processes)))
+                retval = -EFAULT;
+            break;
+
+        case SET_MAX_NR_PROCESSES:
+            // Updating max_processes from the value provided by user space
+            if (copy_from_user(&dev->max_processes, (int __user *)arg, sizeof(dev->max_processes))) {
+                retval = -EFAULT;
+            } else {
+                printk(KERN_INFO "DM510: Max processes updated to %d\n", dev->max_processes);
+            }
+            break;
+
+            break;
+case GET_BUFFER_FREE_SPACE: {
+    int free_space;
+    down(&dev->sem); // Ensure exclusive access
+    if (dev->tail >= dev->head) {
+        free_space = dev->buffer_size - (dev->tail - dev->head) - 1;
+    } else {
+        free_space = (dev->head - dev->tail) - 1;
+    }
+    up(&dev->sem);
+    if (copy_to_user((int __user *)arg, &free_space, sizeof(free_space))) {
+        retval = -EFAULT;
+    }
+    break;
+}
+
+case GET_BUFFER_USED_SPACE: {
+    int used_space;
+    down(&dev->sem); // Ensure exclusive access
+    if (dev->tail >= dev->head) {
+        used_space = dev->tail - dev->head;
+    } else {
+        used_space = dev->buffer_size - (dev->head - dev->tail);
+    }
+    up(&dev->sem);
+    if (copy_to_user((int __user *)arg, &used_space, sizeof(used_space))) {
+        retval = -EFAULT;
+    }
+    break;
+}
+        default:
+            retval = -ENOTTY;
+    }
+    return retval;
 }
 
 static struct file_operations dm510_fops = {
@@ -133,105 +235,68 @@ static struct file_operations dm510_fops = {
     .release = dm510_release,
     .read = dm510_read,
     .write = dm510_write,
+    .unlocked_ioctl = dm510_ioctl,
 };
 
-static int __init dm510_init_module(void) {
-    int result;
-    dev_t dev = 0;
-    
-    if (dm510_major) {
-    dev_t dev = MKDEV(dm510_major, MINOR_START);
-    result = register_chrdev_region(dev, DEVICE_COUNT, DEVICE_NAME);
-} else {
-    result = alloc_chrdev_region(&dev, MINOR_START, DEVICE_COUNT, DEVICE_NAME);
-    dm510_major = MAJOR(dev);
+static void dm510_setup_cdev(struct dm510_device *dev, int index) {
+    int err, devno = MKDEV(dm510_major, MINOR_START + index);
+    cdev_init(&dev->cdev, &dm510_fops);
+    dev->cdev.owner = THIS_MODULE;
+    err = cdev_add(&dev->cdev, devno, 1);
+    if (err)
+        printk(KERN_NOTICE "Error %d adding DM510 device", err);
 }
 
+static void buffer_init(struct dm510_device *dev) {
+    dev->data = kzalloc(BUFFER_SIZE * sizeof(char), GFP_KERNEL);
+    dev->buffer_size = BUFFER_SIZE;
+    memset(dev->data, 0, BUFFER_SIZE);
+    dev->head = 0;
+    dev->tail = 0;
+    sema_init(&dev->sem, 1);
+    init_waitqueue_head(&dev->read_queue);
+    init_waitqueue_head(&dev->write_queue);
+    dev->nreaders = 0;
+    dev->nwriters = 0;
+    dev->max_processes = 1; 
+}
 
+static int __init dm510_init(void) {
+    int result, i;
+    dev_t dev = 0;
+
+    if (dm510_major) {
+        dev = MKDEV(dm510_major, MINOR_START);
+        result = register_chrdev_region(dev, DEVICE_COUNT, DEVICE_NAME);
+    } else {
+        result = alloc_chrdev_region(&dev, MINOR_START, DEVICE_COUNT, DEVICE_NAME);
+        dm510_major = MAJOR(dev);
+    }
     if (result < 0) {
         printk(KERN_WARNING "DM510: can't get major %d\n", dm510_major);
         return result;
     }
 
-    // Initialize each buffer
-    for (int i = 0; i < DEVICE_COUNT; ++i) {
-        buffer_init(&buffers[i]);
+    for (i = 0; i < DEVICE_COUNT; ++i) {
+        buffer_init(&device[i]);
+        dm510_setup_cdev(&device[i], i);
     }
-
-    // Initialize the cdev structure and add it to the kernel
-    cdev_init(&dm510_cdev, &dm510_fops);
-    dm510_cdev.owner = THIS_MODULE;
-    result = cdev_add(&dm510_cdev, dev, DEVICE_COUNT);
-    if (result) {
-        printk(KERN_NOTICE "Error %d adding DM510 device", result);
-        unregister_chrdev_region(dev, DEVICE_COUNT);
-        return result;
-    }
-
-    printk(KERN_INFO "DM510: registered with major number %d\n", dm510_major);
     return 0;
 }
 
-static void __exit dm510_cleanup_module(void) {
-    // Remove the character device
-    cdev_del(&dm510_cdev);
-
-    // Free the device numbers
-    unregister_chrdev_region(MKDEV(dm510_major, MINOR_START), DEVICE_COUNT);
-
-    printk(KERN_INFO "DM510: unregistered the device\n");
-}
-
-
-long dm510_ioctl( 
-    struct file *filp, 
-    unsigned int cmd,   /* command passed from the user */
-    unsigned long arg ) /* argument of the command */
-{
-	/* ioctl code belongs here */
-    switch(cmd){   
-        case GET_BUFFER_SIZE:
-        return buffer -> size;
-
-        case SET_BUFFER_SIZE:{
-            int i;
-            for(i = 0; i < DEVICE_COUNT; i++){
-                int used_space = buffers[i].size - buffer_free_space(buffers + i);
-                if(used_space > arg){
-                    return rerror(-EINVAL, "The buffer(%d) has %lu amount of used space, it cannot be reduced to size %lu", i, used_space, arg);
-                }
-                for(i = 0; i < DEVICE_COUNT ; i++){
-                    buffer_resize(buffers + i, arg);
-                }
-            }
-            break;
-
-            case GET_MAX_NR_PROCESSES:
-            return max_processes;
-
-            case SET_MAX_NR_PROCESSES:
-            max_processes = arg;
-            break;
-
-            case GET_BUFFER_FREE_SPACE:
-            return buffer_free_space(buffers + arg);
-
-            case GET_BUFFER_USED_SPACE:
-            return buffers[arg].size - free_space(buffers + arg);
-        }
+static void __exit dm510_cleanup(void) {
+    int i;
+    for (i = 0; i < DEVICE_COUNT; ++i) {
+        kfree(device[i].data);
+        cdev_del(&device[i].cdev);
     }
-
-	//printk(KERN_INFO "DM510: ioctl called.\n");
-
-	return 0; //has to be changed
+    unregister_chrdev_region(MKDEV(dm510_major, MINOR_START), DEVICE_COUNT);
+    printk(KERN_INFO "DM510: unregistered the devices\n");
 }
 
+module_init(dm510_init);
+module_exit(dm510_cleanup);
 
-module_init(dm510_init_module);
-module_exit(dm510_cleanup_module);
-
-MODULE_AUTHOR("Your Name Here");
+MODULE_AUTHOR("Your Name");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DM510 Assignment Device Driver");
-
-
