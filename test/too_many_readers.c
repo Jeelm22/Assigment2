@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <errno.h>
-#include "dm510_ioctl_commands.h"
+#include "ioctl_commands.h"
 #include <sys/ioctl.h>
 
 int main(int argc, char const *argv[]) {
@@ -17,7 +17,7 @@ int main(int argc, char const *argv[]) {
         return EXIT_FAILURE;
     }
     //Get maximum number of processes allowed to read fro the device, with ioctl commmand
-    const int size = ioctl(read_pointer, GET_MAX_NR_PROC, 0);
+    const int size = ioctl(read_pointer, GET_MAX_NR_PROCESSES, 0);
     //Initialize a counter for the loop
     size_t i = 1;
 
