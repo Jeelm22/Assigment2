@@ -6,12 +6,10 @@
 #include <sys/ioctl.h>
 #include "ioctl_commands.h"
 
-#define DEVICE_FILE "/dev/dm510-0"
-
 int main() {
     //Open device file with read-write access
-    int device_fd = open(DEVICE_FILE, O_RDWR);
-    if (device_fd < 0) {
+    int writer_pointer = open("/dev/dm510-0", O_RDWR);
+    if (writer_pointer < 0) {
         fprintf(stderr, "Failed to open device: %s\n", strerror(errno));
         //Return 1, if opening fails
         return 1;
@@ -19,10 +17,10 @@ int main() {
 
     //Get the current buffer size of the device using an ioctl call
     int buffer_size;
-    int result = ioctl(device_fd, GET_BUFFER_SIZE, &buffer_size);
+    int result = ioctl(writer_pointer, GET_BUFFER_SIZE, &buffer_size);
     if (result < 0) {
         fprintf(stderr, "Failed to get buffer size: %s\n", strerror(errno));
-        close(device_fd);
+        close(writer_pointer);
         //Return 2, if the ioctl call fails
         return 2;
     }
@@ -34,10 +32,10 @@ int main() {
     //Loop through the number of time equel to the buffer size, write a byte each time
     for (int i = 0; i < buffer_size; ++i) {
         //Write one byte to the device
-        bytes_written = write(device_fd, &byte_to_write, sizeof(byte_to_write));
+        bytes_written = write(writer_pointer, &byte_to_write, sizeof(byte_to_write));
         if (bytes_written < 0) {
             fprintf(stderr, "Failed to write to device: %s\n", strerror(errno));
-            close(device_fd);
+            close(writer_pointer);
             //Reutrn 3, if writing fails
             return 3;
         }
@@ -46,7 +44,7 @@ int main() {
     }
 
     //Write one more byte to check if the buffer is full
-    bytes_written = write(device_fd, &byte_to_write, sizeof(byte_to_write));
+    bytes_written = write(writer_pointer, &byte_to_write, sizeof(byte_to_write));
     if (bytes_written < 0) {
 	if (errno == EAGAIN || errno == EWOULDBLOCK) {
         //If it failes, print error message
@@ -59,6 +57,6 @@ int main() {
         printf("Unexpectedly able to write beyond reported buffer size.\n");
     }
     //Close device file to release system resources
-    close(device_fd);
+    close(writer_pointer);
     return 0;
 }
