@@ -5,7 +5,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/ioctl.h>
-#include "dm510_ioctl_commands.h"
+#include "ioctl_commands.h"
 
 int main(int argc, char const *argv[]) {
     //Open the device file for read-write access, in non-blocking mode
@@ -26,13 +26,16 @@ int main(int argc, char const *argv[]) {
         //Write character to device
         write(write_pointer, &n, sizeof(n));
         n++;    //Increment the character 
-        i++;    //Increment the loop counter //måske udkomenter den her linje
+        i++;    //Increment the loop counter // måske ud komenter den her linje
     }
     //Check if the buffer is full, by writing once more
     if (write(write_pointer, &n, sizeof(n)) < 0) {
-        //Print error messaeges if it failes
-        printf("Buffer is full\n");
-    }
+         if (errno == EAGAIN || errno == EWOULDBLOCK) {
+	    printf("Buffer is full\n");
+         } else {
+             perror("Failed to write to device");
+    	 }
+}
     // Close the device file descriptor
     close(write_pointer); 
     return 0;
