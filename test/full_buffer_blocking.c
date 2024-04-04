@@ -18,17 +18,19 @@ int main() {
     }
 
     //Get the current buffer size of the device using an ioctl call
-    int buffer_size = ioctl(device_fd, GET_BUFFER_SIZE);
-    if (buffer_size < 0) {
+    int buffer_size;
+    int result = ioctl(device_fd, GET_BUFFER_SIZE, &buffer_size);
+    if (result < 0) {
         fprintf(stderr, "Failed to get buffer size: %s\n", strerror(errno));
         close(device_fd);
-        //Return 1, if the ioctl call fails
-        return 1;
+        //Return 2, if the ioctl call fails
+        return 2;
     }
 
     //Initialize variable to keep track of the byte value to be written to the device
     char byte_to_write = 0;
     ssize_t bytes_written;
+
     //Loop through the number of time equel to the buffer size, write a byte each time
     for (int i = 0; i < buffer_size; ++i) {
         //Write one byte to the device
@@ -36,8 +38,8 @@ int main() {
         if (bytes_written < 0) {
             fprintf(stderr, "Failed to write to device: %s\n", strerror(errno));
             close(device_fd);
-            //Reutrn 1, if writing fails
-            return 1;
+            //Reutrn 3, if writing fails
+            return 3;
         }
         //Increment byte value to write for the next iteration
         byte_to_write++;
@@ -46,8 +48,12 @@ int main() {
     //Write one more byte to check if the buffer is full
     bytes_written = write(device_fd, &byte_to_write, sizeof(byte_to_write));
     if (bytes_written < 0) {
+	if (errno == EAGAIN || errno == EWOULDBLOCK) {
         //If it failes, print error message
-        printf("Buffer is full.\n");
+	   printf("Buffer is full.\n");
+    	} else {
+            fprintf(stderr, "Unexpected error when writing to a full buffer: %s\n", strerror(errno));
+	}
     } else {
         //If it succeeds, print messeage 
         printf("Unexpectedly able to write beyond reported buffer size.\n");
