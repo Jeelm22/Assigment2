@@ -103,7 +103,7 @@ ssize_t dm510_read(struct file *filp, char __user *buf, size_t count, loff_t *f_
     while (dev->head == dev->tail) { 
         up(&dev->sem);
         if (filp->f_flags & O_NONBLOCK)
-            return -EAGAIN;
+            return rerror (-EAGAIN, "File could not be blocked");
         if (wait_event_interruptible(dev->read_queue, dev->head != dev->tail))
             return -ERESTARTSYS; 
         if (down_interruptible(&dev->sem))
@@ -136,7 +136,7 @@ ssize_t dm510_write(struct file *filp, const char __user *buf, size_t count, lof
     while ((dev->tail + 1) % BUFFER_SIZE == dev->head) { 
         up(&dev->sem); 
         if (filp->f_flags & O_NONBLOCK)
-            return -EAGAIN;
+            return rerror (-EAGAIN, "File could not be blocked");
         if (wait_event_interruptible(dev->write_queue, (dev->tail + 1) % BUFFER_SIZE != dev->head))
             return -ERESTARTSYS; 
         if (down_interruptible(&dev->sem))
