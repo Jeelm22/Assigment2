@@ -28,8 +28,8 @@ int main(int argc, char const *argv[]) {
         perror("Failed to open the device file");
         return 1;
     }
-
-    int setResult = ioctl(fileDescriptor, SET_BUFFER_SIZE, newSize);
+    
+    int setResult = ioctl(fileDescriptor, SET_BUFFER_SIZE, &newSize);
     if (setResult < 0) {
         // Use errno to determine the type of error
         switch(errno) {
