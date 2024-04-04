@@ -16,8 +16,9 @@ int main(int argc, char const *argv[]) {
         //Retrun 1 to indicate a failure
         return 1;
     }
-    //Retrieve the current size of the device buffer with ioctl command
-    const int size = ioctl(write_pointer, GET_BUFFER_SIZE);
+    //Retrieve the current buffer size of the device buffer with ioctl command
+    int buffer_size;
+    const int result = ioctl(write_pointer, GET_BUFFER_SIZE, &buffer_size);
     char n = 0;    //Initialize character to write to the device
     size_t i = 0;    //Counter for the loop
 
