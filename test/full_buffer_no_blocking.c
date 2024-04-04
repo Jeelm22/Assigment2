@@ -26,7 +26,7 @@ int main(int argc, char const *argv[]) {
         //Write character to device
         write(write_pointer, &n, sizeof(n));
         n++;    //Increment the character 
-        i++;    //Increment the loop counter
+        i++;    //Increment the loop counter //måske udkomenter den her linje
     }
     //Check if the buffer is full, by writing once more
     if (write(write_pointer, &n, sizeof(n)) < 0) {
