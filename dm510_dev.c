@@ -20,13 +20,19 @@
 static int dm510_major = 0;
 module_param(dm510_major, int, S_IRUGO);
 
-struct dm510_device {
-    struct cdev cdev;
-    char *data; // Changed to a pointer to support dynamic resizing
-    int buffer_size; // New field to keep track of the buffer size
+struct buffer {
+    char *data;
+    int size;
     int head, tail;
     struct semaphore sem;
     wait_queue_head_t read_queue, write_queue;
+};
+
+static struct buffer shared_buffer; 
+
+struct dm510_device {
+    struct cdev cdev;
+    struct buffer *shared_buffer;
     int nreaders, nwriters;
     int max_processes; // New field to limit the number of processes
 };
@@ -34,21 +40,20 @@ struct dm510_device {
 static struct dm510_device device[DEVICE_COUNT];
 
 static int dm510_open(struct inode *inode, struct file *filp) {
-    struct dm510_device *dev;
-    dev = container_of(inode->i_cdev, struct dm510_device, cdev);
+    struct dm510_device *dev =  container_of(inode->i_cdev, struct dm510_device, cdev);
     filp->private_data = dev;
 
     printk(KERN_INFO "DM510: Attempting to open device\n");
 
 
-    if (down_interruptible(&dev->sem))
+    if (down_interruptible(&shared_buffer.sem))
         return -ERESTARTSYS;
     switch (filp->f_flags & O_ACCMODE) {
 	    // Will be denind writing acces, becues device is busy
         case O_WRONLY:
             if (dev->nwriters) {
                 printk(KERN_INFO "DM510: Device is busy, write access denied\n");
-                up(&dev->sem);
+                up(&shared_buffer.sem);
                 return -EBUSY;
             }
             dev->nwriters++;
@@ -57,7 +62,7 @@ static int dm510_open(struct inode *inode, struct file *filp) {
 		// Will be dening access, becues there are to many readers
             if (dev->nreaders >= dev->max_processes) {
                 printk(KERN_INFO "DM510: Too many readers, access denied\n");
-                up(&dev->sem);
+                up(&shared_buffer.sem);
                 return -EMFILE;
             }
             dev->nreaders++;
@@ -66,13 +71,13 @@ static int dm510_open(struct inode *inode, struct file *filp) {
 		// Will be denine read/write access becuse device is busy
             if (dev->nwriters) {
                 printk(KERN_INFO "DM510: Device is busy, read/write access denied\n");
-                up(&dev->sem);
+                up(&shared_buffer.sem);
                 return -EBUSY;
             }
             // This needs to check max_processes for readers as well
 	    // Will be denine access becues there are too many readers
             if (dev->nreaders >= dev->max_processes) {
-                up(&dev->sem);
+                up(&shared_buffer.sem);
                 return -EMFILE;
             }
             dev->nwriters++;
@@ -81,7 +86,7 @@ static int dm510_open(struct inode *inode, struct file *filp) {
     }
     printk(KERN_INFO "DM510: Device opened successfully\n");
 
-    up(&dev->sem);
+    up(&shared_buffer.sem);
     return 0;
 }
 
@@ -91,7 +96,7 @@ static int dm510_release(struct inode *inode, struct file *filp) {
 
     printk(KERN_INFO "DM510: Releasing device\n");
 
-    down(&dev->sem);
+    down(&shared_buffer.sem);
     // Handle the release of writers properly
     if ((filp->f_flags & O_ACCMODE) == O_WRONLY || (filp->f_flags & O_ACCMODE) == O_RDWR)
         dev->nwriters--;
@@ -99,81 +104,92 @@ static int dm510_release(struct inode *inode, struct file *filp) {
     if ((filp->f_flags & O_ACCMODE) == O_RDONLY || (filp->f_flags & O_ACCMODE) == O_RDWR)
         dev->nreaders--;
     printk(KERN_INFO "DM510: Device released, readers: %d, writers: %d\n", dev->nreaders, dev->nwriters);    
-    up(&dev->sem);
+    up(&shared_buffer.sem);
     return 0;
 }
 
 
 ssize_t dm510_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos) {
     struct dm510_device *dev = filp->private_data;
-    ssize_t result = 0;
-    if (down_interruptible(&dev->sem))
+    struct buffer *shared_buf = dev->shared_buffer; // Point to the shared buffer
+    
+
+    if (down_interruptible(&shared_buf->sem))
         return -ERESTARTSYS;
-    while (dev->head == dev->tail) { 
-        up(&dev->sem);
-        if (filp->f_flags & O_NONBLOCK){
-	    printk(KERN_WARNING "dm510_read: Operation would block, returning -EAGAIN\n");
-	    return -EAGAIN;
-	}
-        if (wait_event_interruptible(dev->read_queue, dev->head != dev->tail))
-            return -ERESTARTSYS; 
-        if (down_interruptible(&dev->sem))
-            return -ERESTARTSYS;
+
+    // Wait for data to be available
+    while (shared_buf->head == shared_buf->tail) {
+        up(&shared_buf->sem); // Release the semaphore if going to sleep
+        if (filp->f_flags & O_NONBLOCK) {
+            return -EAGAIN; // Return immediately if non-blocking
+        }
+        if (wait_event_interruptible(shared_buf->read_queue, shared_buf->head != shared_buf->tail))
+            return -ERESTARTSYS; // If interrupted, return this value
+        if (down_interruptible(&shared_buf->sem))
+            return -ERESTARTSYS; // Re-acquire semaphore after waking up
     }
 
-    if (dev->head < dev->tail)
-        count = min(count, (size_t)(dev->tail - dev->head));
-    else 
-        count = min(count, (size_t)(BUFFER_SIZE - dev->head));
-    if (copy_to_user(buf, dev->data + dev->head, count)) {
-	result = -EFAULT; // Error accessing user space buffer
-        goto out;
-    }
-    dev->head = (dev->head + count) % BUFFER_SIZE; // Update head pointer
-    wake_up_interruptible(&dev->write_queue); // Wake up any waiting writers
+    // Adjust count if needed and perform the read operation
+    if (shared_buf->head < shared_buf->tail)
+        count = min(count, (size_t)(shared_buf->tail - shared_buf->head));
+    else
+        count = min(count, (size_t)(shared_buf->size - shared_buf->head));
 
-    result = count; // Return number of bytes read
-    out:	
-    up(&dev->sem);
-    return result;
+    if (copy_to_user(buf, shared_buf->data + shared_buf->head, count)) {
+        up(&shared_buf->sem); // Release the semaphore in case of copy error
+        return -EFAULT;
+    }
+
+    // Update the head pointer after read
+    shared_buf->head = (shared_buf->head + count) % shared_buf->size;
+    wake_up_interruptible(&shared_buf->write_queue); // Wake up waiting writers
+
+    up(&shared_buf->sem); // Release the semaphore
+    return count; // Return the number of bytes read
 }
+
 
 ssize_t dm510_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos) {
     struct dm510_device *dev = filp->private_data;
-    ssize_t result = 0;
-    if (down_interruptible(&dev->sem))
+    struct buffer *shared_buf = dev->shared_buffer; // Use the shared buffer
+
+    if (down_interruptible(&shared_buf->sem))
         return -ERESTARTSYS;
-    while ((dev->tail + 1) % BUFFER_SIZE == dev->head) { 
-        up(&dev->sem); 
+
+    // Ensure there is space to write
+    while (((shared_buf->tail + 1) % shared_buf->size) == shared_buf->head) {
+        up(&shared_buf->sem); // Release the semaphore if going to sleep
         if (filp->f_flags & O_NONBLOCK) {
-	    printk(KERN_WARNING "dm510_read: Operation would block, returning -EAGAIN\n");
-	    return -EAGAIN;
-	}
-        if (wait_event_interruptible(dev->write_queue, (dev->tail + 1) % BUFFER_SIZE != dev->head))
-            return -ERESTARTSYS; 
-        if (down_interruptible(&dev->sem))
-            return -ERESTARTSYS;
+            return -EAGAIN; // Non-blocking write, return immediately
+        }
+        if (wait_event_interruptible(shared_buf->write_queue, ((shared_buf->tail + 1) % shared_buf->size) != shared_buf->head))
+            return -ERESTARTSYS; // If interrupted, return
+        if (down_interruptible(&shared_buf->sem))
+            return -ERESTARTSYS; // Re-acquire semaphore after waking up
     }
-    count = min(count, (size_t)(BUFFER_SIZE - dev->tail));
-    if (copy_from_user(dev->data + dev->tail, buf, count)) {
-        result = -EFAULT;
-        goto out;
+
+    // Adjust count if needed and perform the write operation
+    count = min(count, (size_t)(shared_buf->size - shared_buf->tail));
+    if (copy_from_user(shared_buf->data + shared_buf->tail, buf, count)) {
+        up(&shared_buf->sem); // Release semaphore in case of copy error
+        return -EFAULT;
     }
-    dev->tail = (dev->tail + count) % BUFFER_SIZE;
-    printk(KERN_INFO "dm510_write: %zu bytes written to device. New tail position: %d\n", count, dev->tail);
-    wake_up_interruptible(&dev->read_queue);
-    result = count;
-out:
-    up(&dev->sem);
-    return result;
+
+    // Update the tail pointer after write
+    shared_buf->tail = (shared_buf->tail + count) % shared_buf->size;
+    wake_up_interruptible(&shared_buf->read_queue); // Wake up waiting readers
+
+    up(&shared_buf->sem); // Release the semaphore
+    return count; // Return the number of bytes written
 }
+
 
 long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
     struct dm510_device *dev = filp->private_data;
     int new_size, retval = 0;
     switch (cmd) {
         case GET_BUFFER_SIZE:
-            if (copy_to_user((int __user *)arg, &dev->buffer_size, sizeof(dev->buffer_size)))
+            if (copy_to_user((int __user *)arg, &shared_buffer.size, sizeof(shared_buffer.size)))
                 retval = -EFAULT;
             break;
 	case SET_BUFFER_SIZE:
@@ -188,14 +204,14 @@ long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	            printk(KERN_WARNING "DM510: Memory allocation for new buffer failed.\n");
 	            retval = -ENOMEM; // Out of memory
 	        } else {
-	            down(&dev->sem); // Ensure exclusive access to the buffer
-	            //  printk(KERN_INFO "DM510: Current buffer size is %d bytes, new size is %d bytes.\n", dev->buffer_size, new_size);
-            	    kfree(dev->data); // Free old buffer
-            	    dev->data = new_buffer; // Assign new buffer
-            	    dev->buffer_size = new_size; // Update buffer size
-            	    dev->head = 0; // Reset pointers
-            	    dev->tail = 0;
-            	    up(&dev->sem); // Release the semaphore
+	            down(&shared_buffer.sem); // Ensure exclusive access to the buffer
+	            //  printk(KERN_INFO "DM510: Current buffer size is %d bytes, new size is %d bytes.\n", shared_buffer.size, new_size);
+            	    kfree(shared_buffer.data); // Free old buffer
+            	    shared_buffer.data = new_buffer; // Assign new buffer
+            	    shared_buffer.size = new_size; // Update buffer size
+            	    shared_buffer.head = 0; // Reset pointers
+            	    shared_buffer.tail = 0;
+            	    up(&shared_buffer.sem); // Release the semaphore
             	    retval = 0; // Indicate success
         	}
     	    }
@@ -216,13 +232,13 @@ long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 
         case GET_BUFFER_FREE_SPACE: { 
             int free_space;
-            down(&dev->sem); // Ensure exclusive access
-            if (dev->tail >= dev->head) {
-                free_space = dev->buffer_size - (dev->tail - dev->head) - 1;
+            down(&shared_buffer.sem); // Ensure exclusive access
+            if (shared_buffer.tail >= shared_buffer.head) {
+                free_space = shared_buffer.size - (shared_buffer.tail - shared_buffer.head) - 1;
             } else {
-                free_space = (dev->head - dev->tail) - 1;
+                free_space = (shared_buffer.head - shared_buffer.tail) - 1;
             }
-            up(&dev->sem);
+            up(&shared_buffer.sem);
             if (copy_to_user((int __user *)arg, &free_space, sizeof(free_space))) {
                 retval = -EFAULT;
             }
@@ -231,13 +247,13 @@ long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 
         case GET_BUFFER_USED_SPACE: {
             int used_space;
-            down(&dev->sem); // Ensure exclusive access
-            if (dev->tail >= dev->head) {
-                used_space = dev->tail - dev->head;
+            down(&shared_buffer.sem); // Ensure exclusive access
+            if (shared_buffer.tail >= shared_buffer.head) {
+                used_space = shared_buffer.tail - shared_buffer.head;
             } else {
-                used_space = dev->buffer_size - (dev->head - dev->tail);
+                used_space = shared_buffer.size - (shared_buffer.head - shared_buffer.tail);
             }
-            up(&dev->sem);
+            up(&shared_buffer.sem);
             if (copy_to_user((int __user *)arg, &used_space, sizeof(used_space))) {
                 retval = -EFAULT;
             }
@@ -259,31 +275,50 @@ static struct file_operations dm510_fops = {
 };
 
 static void dm510_setup_cdev(struct dm510_device *dev, int index) {
-    int err, devno = MKDEV(dm510_major, MINOR_START + index);
+    int err;
+    dev_t devno = MKDEV(dm510_major, MINOR_START + index);
+
+    // Set up the char device
     cdev_init(&dev->cdev, &dm510_fops);
     dev->cdev.owner = THIS_MODULE;
+
+    // Add the char device
     err = cdev_add(&dev->cdev, devno, 1);
-    if (err)
+    if (err) {
         printk(KERN_NOTICE "Error %d adding DM510 device", err);
+        return;
+    }
+
+    // Point the device's shared_buffer pointer to the actual shared_buffer
+    dev->shared_buffer = &shared_buffer;
 }
 
 static void buffer_init(struct dm510_device *dev) {
-    dev->data = kzalloc(BUFFER_SIZE * sizeof(char), GFP_KERNEL);
-    dev->buffer_size = BUFFER_SIZE;
-    memset(dev->data, 0, BUFFER_SIZE);
-    dev->head = 0;
-    dev->tail = 0;
-    sema_init(&dev->sem, 1);
-    init_waitqueue_head(&dev->read_queue);
-    init_waitqueue_head(&dev->write_queue);
+    // Initialize device-specific fields
+    sema_init(&shared_buffer.sem, 1);
     dev->nreaders = 0;
     dev->nwriters = 0;
-    dev->max_processes = 1; 
+    dev->max_processes = 1;
+    // Point to the shared buffer
+    dev->shared_buffer = &shared_buffer;
 }
 
 static int __init dm510_init(void) {
     int result, i;
     dev_t dev = 0;
+    //Initialize shared_buffer
+    shared_buffer.data = kzalloc(BUFFER_SIZE * sizeof(char), GFP_KERNEL);
+    if (!shared_buffer.data) {
+        // Handle memory allocation error
+        printk(KERN_WARNING "DM510: Unable to allocate shared buffer\n");
+        return -ENOMEM;
+    }
+    shared_buffer.size = BUFFER_SIZE;
+    sema_init(&shared_buffer.sem, 1);
+    init_waitqueue_head(&shared_buffer.read_queue);
+    init_waitqueue_head(&shared_buffer.write_queue);
+    shared_buffer.head = 0;
+    shared_buffer.tail = 0;
 
     if (dm510_major) {
         dev = MKDEV(dm510_major, MINOR_START);
@@ -307,10 +342,11 @@ static int __init dm510_init(void) {
 static void __exit dm510_cleanup(void) {
     int i;
     for (i = 0; i < DEVICE_COUNT; ++i) {
-        kfree(device[i].data);
         cdev_del(&device[i].cdev);
+        
     }
     unregister_chrdev_region(MKDEV(dm510_major, MINOR_START), DEVICE_COUNT);
+    kfree(shared_buffer.data);
     printk(KERN_INFO "DM510: unregistered the devices\n");
 }
 
