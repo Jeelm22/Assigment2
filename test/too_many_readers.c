@@ -53,14 +53,15 @@ int main(int argc, char const *argv[]) {
     // Open device files up to the maximum number of readers
     for (int i = 1; i <= max_readers + 1; i++) {
         fds[i] = open("/dev/dm510-0", O_RDONLY);
-        printf("Read pointer %d : %d ", i, fds[i]);
+        printf("Read pointer %d : %d ", i + 1, fds[i]);
         if (fds[i] < 0) {
             perror("Error opening device file");
             break;
         }
-        printf("\n");
+       
     }
-
+    printf("\n");
+    
     // Cleanup: Close all opened file descriptors
     for (int j = 1; j <= max_readers + 1; j++) {
         if (fds[j] != -1) {
