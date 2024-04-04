@@ -8,6 +8,7 @@
 #include <sys/ioctl.h>
 
 int main(int argc, char const *argv[]) {
+    printf("Setting max amount of readers to: %d\n", desired_max_readers);
     int desired_max_readers = 9; // Change this to the expected max readers
     int max_readers; // This will hold the maximum number of readers allowed
     int ret; // To capture return values of system calls
@@ -21,8 +22,7 @@ int main(int argc, char const *argv[]) {
     }
 
     // Set the maximum number of reader processes
-    printf("Setting max amount of readers to: %d\n", desired_max_readers);
-    ret = ioctl(read_pointer, SET_MAX_NR_PROCESSES, &desired_max_readers);
+    ret = ioctl(read_pointer, SET_MAX_NR_PROCESSES, &desired_max_readers);  
     if (ret < 0) {
         perror("Failed to set the maximum number of reader processes");
         close(read_pointer);
