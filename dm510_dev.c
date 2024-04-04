@@ -35,42 +35,37 @@ static struct dm510_device device[DEVICE_COUNT];
 
 static int dm510_open(struct inode *inode, struct file *filp) {
     struct dm510_device *dev;
-
     dev = container_of(inode->i_cdev, struct dm510_device, cdev);
     filp->private_data = dev;
 
     if (down_interruptible(&dev->sem))
         return -ERESTARTSYS;
-
-    printk(KERN_INFO "dm510_open: Current readers: %d, writers: %d, max processes: %d\n",
-           dev->nreaders, dev->nwriters, dev->max_processes);
-
     switch (filp->f_flags & O_ACCMODE) {
+	    // Will be denind writing acces, becues device is busy
         case O_WRONLY:
             if (dev->nwriters) {
-                printk(KERN_INFO "dm510_open: Write access denied, device busy.\n");
                 up(&dev->sem);
                 return -EBUSY;
             }
             dev->nwriters++;
             break;
         case O_RDONLY:
+		// Will be dening access, becues there are to many readers
             if (dev->nreaders >= dev->max_processes) {
-                printk(KERN_INFO "dm510_open: Read access denied, too many readers.\n");
                 up(&dev->sem);
                 return -EMFILE;
             }
             dev->nreaders++;
             break;
         case O_RDWR:
+		// Will be denine read/write access becuse device is busy
             if (dev->nwriters) {
-                printk(KERN_INFO "dm510_open: Read/Write access denied, device busy.\n");
                 up(&dev->sem);
                 return -EBUSY;
             }
             // This needs to check max_processes for readers as well
+	    // Will be denine access becues there are too many readers
             if (dev->nreaders >= dev->max_processes) {
-                printk(KERN_INFO "dm510_open: Read/Write access denied, too many readers.\n");
                 up(&dev->sem);
                 return -EMFILE;
             }
@@ -78,9 +73,6 @@ static int dm510_open(struct inode *inode, struct file *filp) {
             dev->nreaders++;
             break;
     }
-
-    printk(KERN_INFO "dm510_open: Access granted. Current readers: %d, writers: %d\n",
-           dev->nreaders, dev->nwriters);
 
     up(&dev->sem);
     return 0;
@@ -106,10 +98,8 @@ static int dm510_release(struct inode *inode, struct file *filp) {
 ssize_t dm510_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos) {
     struct dm510_device *dev = filp->private_data;
     ssize_t result = 0;
-
     if (down_interruptible(&dev->sem))
         return -ERESTARTSYS;
-
     while (dev->head == dev->tail) { 
         up(&dev->sem);
         if (filp->f_flags & O_NONBLOCK)
@@ -141,10 +131,8 @@ out:
 ssize_t dm510_write(struct file *filp, const char __user *buf, size_t count, loff_t *f_pos) {
     struct dm510_device *dev = filp->private_data;
     ssize_t result = 0;
-
     if (down_interruptible(&dev->sem))
         return -ERESTARTSYS;
-
     while ((dev->tail + 1) % BUFFER_SIZE == dev->head) { 
         up(&dev->sem); 
         if (filp->f_flags & O_NONBLOCK)
@@ -154,7 +142,6 @@ ssize_t dm510_write(struct file *filp, const char __user *buf, size_t count, lof
         if (down_interruptible(&dev->sem))
             return -ERESTARTSYS;
     }
-
     count = min(count, (size_t)(BUFFER_SIZE - dev->tail));
     if (copy_from_user(dev->data + dev->tail, buf, count)) {
         result = -EFAULT;
@@ -162,9 +149,7 @@ ssize_t dm510_write(struct file *filp, const char __user *buf, size_t count, lof
     }
     dev->tail = (dev->tail + count) % BUFFER_SIZE;
     wake_up_interruptible(&dev->read_queue);
-
     result = count;
-
 out:
     up(&dev->sem);
     return result;
@@ -173,19 +158,16 @@ out:
 long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
     struct dm510_device *dev = filp->private_data;
     int new_size, retval = 0;
-
     switch (cmd) {
         case GET_BUFFER_SIZE:
             if (copy_to_user((int __user *)arg, &dev->buffer_size, sizeof(dev->buffer_size)))
                 retval = -EFAULT;
             break;
 	case SET_BUFFER_SIZE:
-	    printk(KERN_INFO "DM510: Received request to set new buffer size, arg address: %p\n", (void *)arg);	
 	    if (copy_from_user(&new_size, (int __user *)arg, sizeof(new_size))) {
         	printk(KERN_WARNING "DM510: Error copying buffer size from user.\n");
         	retval = -EFAULT;
 	    } else if (new_size < 5) { // Ensure minimum buffer size of 5 bytes
-        	printk(KERN_INFO "DM510: Requested buffer size %d is too small. Minimum size is 5 bytes.\n", new_size);
         	retval = -EINVAL; // Invalid buffer size
 	    } else {
         	char *new_buffer = kzalloc(new_size * sizeof(char), GFP_KERNEL);
@@ -194,14 +176,12 @@ long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 	            retval = -ENOMEM; // Out of memory
 	        } else {
 	            down(&dev->sem); // Ensure exclusive access to the buffer
-	            printk(KERN_INFO "DM510: Current buffer size is %d bytes, new size is %d bytes.\n", dev->buffer_size, new_size);
-            	    // No need to check used space since data will be cleared
+	            //  printk(KERN_INFO "DM510: Current buffer size is %d bytes, new size is %d bytes.\n", dev->buffer_size, new_size);
             	    kfree(dev->data); // Free old buffer
             	    dev->data = new_buffer; // Assign new buffer
             	    dev->buffer_size = new_size; // Update buffer size
             	    dev->head = 0; // Reset pointers
             	    dev->tail = 0;
-            	    printk(KERN_INFO "DM510: Buffer size successfully changed to %d bytes.\n", new_size);
             	    up(&dev->sem); // Release the semaphore
             	    retval = 0; // Indicate success
         	}
@@ -216,17 +196,12 @@ long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
 
         case SET_MAX_NR_PROCESSES:
             // Updating max_processes from the value provided by user space
-   	    printk(KERN_INFO "3DM510: Current max_processes = %d\n", dev->max_processes);
-	    printk(KERN_INFO "3:Size of int in kernel space: %zu bytes\n", sizeof(int));
             if (copy_from_user(&dev->max_processes, (int __user *)arg, sizeof(dev->max_processes))) {
                 retval = -EFAULT;
-		printk(KERN_INFO "4:Size of int in kernel space: %zu bytes\n", sizeof(int));
-            } else {
-                printk(KERN_INFO "DM510: ioctl SET_MAX_NR_PROCESSES value received: %d\n", dev->max_processes);
             }
             break;
 
-        case GET_BUFFER_FREE_SPACE: {
+        case GET_BUFFER_FREE_SPACE: { 
             int free_space;
             down(&dev->sem); // Ensure exclusive access
             if (dev->tail >= dev->head) {
@@ -239,7 +214,7 @@ long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
                 retval = -EFAULT;
             }
             break;
-        }
+	}
 
         case GET_BUFFER_USED_SPACE: {
             int used_space;
@@ -253,12 +228,12 @@ long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
             if (copy_to_user((int __user *)arg, &used_space, sizeof(used_space))) {
                 retval = -EFAULT;
             }
-            break;
+	    break;
 	}
                 default:
                     retval = -ENOTTY;
-            }
-            return retval;
+	   }
+    	   return retval;
 }
 
 static struct file_operations dm510_fops = {
@@ -332,4 +307,3 @@ module_exit(dm510_cleanup);
 MODULE_AUTHOR("Your Name");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DM510 Assignment Device Driver");
-
