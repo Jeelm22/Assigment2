@@ -180,28 +180,33 @@ long dm510_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
                 retval = -EFAULT;
             break;
 	case SET_BUFFER_SIZE:
+	    printk(KERN_INFO "DM510: Received request to set new buffer size, arg address: %p\n", (void *)arg);	
 	    if (copy_from_user(&new_size, (int __user *)arg, sizeof(new_size))) {
-	        retval = -EFAULT;
+        	printk(KERN_WARNING "DM510: Error copying buffer size from user.\n");
+        	retval = -EFAULT;
 	    } else if (new_size < 5) { // Ensure minimum buffer size of 5 bytes
-	        printk(KERN_INFO "DM510: Requested buffer size %d is too small. Minimum size is 5 bytes.\n", new_size);
-	        retval = -EINVAL; // Invalid buffer size
+        	printk(KERN_INFO "DM510: Requested buffer size %d is too small. Minimum size is 5 bytes.\n", new_size);
+        	retval = -EINVAL; // Invalid buffer size
 	    } else {
-	        char *new_buffer = kzalloc(new_size * sizeof(char), GFP_KERNEL);
-	        if (!new_buffer) {
+        	char *new_buffer = kzalloc(new_size * sizeof(char), GFP_KERNEL);
+        	if (!new_buffer) {
+	            printk(KERN_WARNING "DM510: Memory allocation for new buffer failed.\n");
 	            retval = -ENOMEM; // Out of memory
 	        } else {
-	   	    down(&dev->sem); // Ensure exclusive access to the buffer
-	            // No need to check used space since data will be cleared
-	            kfree(dev->data); // Free old buffer
-        	    dev->data = new_buffer; // Assign new buffer
-	            dev->buffer_size = new_size; // Update buffer size
- 	            dev->head = 0; // Reset pointers
-	            dev->tail = 0;
-        	    printk(KERN_INFO "DM510: Buffer size successfully changed to %d bytes.\n", new_size);
-	            up(&dev->sem); // Release the semaphore
+	            down(&dev->sem); // Ensure exclusive access to the buffer
+	            printk(KERN_INFO "DM510: Current buffer size is %d bytes, new size is %d bytes.\n", dev->buffer_size, new_size);
+            	    // No need to check used space since data will be cleared
+            	    kfree(dev->data); // Free old buffer
+            	    dev->data = new_buffer; // Assign new buffer
+            	    dev->buffer_size = new_size; // Update buffer size
+            	    dev->head = 0; // Reset pointers
+            	    dev->tail = 0;
+            	    printk(KERN_INFO "DM510: Buffer size successfully changed to %d bytes.\n", new_size);
+            	    up(&dev->sem); // Release the semaphore
+            	    retval = 0; // Indicate success
         	}
-    	   }
-	   break;
+    	    }
+   	    break;
 
        case GET_MAX_NR_PROCESSES:
            if (copy_to_user((int __user *)arg, &dev->max_processes, sizeof(dev->max_processes))) {
@@ -327,3 +332,4 @@ module_exit(dm510_cleanup);
 MODULE_AUTHOR("Your Name");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DM510 Assignment Device Driver");
+
