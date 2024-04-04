@@ -7,45 +7,51 @@
 #include "ioctl_commands.h"
 #include <sys/ioctl.h>
 
-//Find the smallest used space in all buffers
 int get_minimum_used_space(int fd) {
     int usedSpace;
-    // Pass the address of usedSpace to ioctl
     if (ioctl(fd, GET_BUFFER_USED_SPACE, &usedSpace) < 0) {
         perror("Failed to get buffer used space");
-        return -1; // Return -1 to indicate error
+        return -1; // Propagate the error back
     }
     return usedSpace;
 }
 
-
 int main(int argc, char const *argv[]) {
-    //Ensure there is at least one argument provided
     if (argc <= 1) {
-        //Exit if no arguments were provided
-        return 0; 
+        printf("Usage: %s <new_buffer_size>\n", argv[0]);
+        return 1; 
     }
 
-    //Get new size by convert the first argument to an integer
-    int newSize = strtol(argv[1], NULL, 10); 
-    
-    // Open the device file in read-only mode
-    int fileDescriptor = open("/dev/dm510-0", O_RDONLY); 
-    
-    // Attempt to set the buffer size using ioctl command
+    int newSize = strtol(argv[1], NULL, 10);
+    int fileDescriptor = open("/dev/dm510-0", O_RDONLY);
+    if (fileDescriptor < 0) {
+        perror("Failed to open the device file");
+        return 1;
+    }
+
     int setResult = ioctl(fileDescriptor, SET_BUFFER_SIZE, newSize);
-    
-    // Check if the buffer size change was successful
-	if (setResult < 0) {
-    // If it failed, find the minimum used space in the buffers
-	    int usedSpace = get_minimum_used_space(fileDescriptor);
-	    if (usedSpace < 0) {
-	        // Error handling was already done in get_minimum_used_space
-	        return 1; // Exit with an error code
-	    }
-	    printf("Cannot reduce buffer size to %d bytes; minimum used space is %d bytes.\n", newSize, usedSpace);
-	} else {
-	    printf("Buffer size successfully changed to: %d bytes\n", newSize);
-	}
+    if (setResult < 0) {
+        // Use errno to determine the type of error
+        switch(errno) {
+            case EINVAL:
+                printf("Cannot reduce buffer size to %d bytes; requested size is below the minimum allowed.\n", newSize);
+                break;
+            case ENOMEM:
+                printf("Failed to allocate memory for the new buffer size.\n");
+                break;
+            default:
+                printf("Buffer size change failed for an unknown reason. Error code: %d\n", errno);
+                break;
+        }
+        // Optionally, print the minimum used space if it's relevant to the error
+        int usedSpace = get_minimum_used_space(fileDescriptor);
+        if (usedSpace >= 0) {
+            printf("Minimum used space is %d bytes.\n", usedSpace);
+        }
+    } else {
+        printf("Buffer size successfully changed to: %d bytes\n", newSize);
+    }
+
+    close(fileDescriptor);
     return 0;
 }
