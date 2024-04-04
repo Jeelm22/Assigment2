@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <errno.h>
-#include "dm510_ioctl_commands.h"
+#include "ioctl_commands.h"
 
 int main(int argc, char const *argv[]) {
     //Initialize loop counter, for looping through devices
@@ -27,3 +27,6 @@ int main(int argc, char const *argv[]) {
     //Exit the program succesfully, if there loop completes without errors
     return 0;
 }
+
+
+
